@@ -14,11 +14,22 @@
 //
 // GET /api/crawl-reviews?app_id=mobile.acb.com.vn&apple_id=950141024&country=vn&since=2025-07-01&until=2026-07-06
 
-const gplay = require('google-play-scraper').default;
+// google-play-scraper ships ESM-only (no CommonJS build). require() works on
+// some local Node versions via experimental interop, but Vercel's serverless
+// runtime does not support it (throws ERR_REQUIRE_ESM) — dynamic import()
+// works everywhere, so we lazily load and cache the module instead.
+let gplayPromise = null;
+function getGplay() {
+  if (!gplayPromise) {
+    gplayPromise = import('google-play-scraper').then((m) => m.default);
+  }
+  return gplayPromise;
+}
 
 // --- Google Play -----------------------------------------------------------
 
 async function crawlGooglePlay(appId, country, language, { maxPages, pageSize, since, until }) {
+  const gplay = await getGplay();
   const all = [];
   let token;
   const sinceDate = since ? new Date(since) : null;
