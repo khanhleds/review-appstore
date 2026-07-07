@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>App Review Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>🔍 App Review Dashboard</h1>
+  <p class="muted">Nhập tên app bất kỳ → tự tìm trên Google Play + App Store → crawl + phân loại review bằng Claude</p>
+</header>
+
+<section class="panel">
+  <h2>1. Tìm app</h2>
+  <form id="searchForm" class="row">
+    <input type="text" id="searchInput" placeholder="Tên app, VD: ACB ONE, Techcombank, Momo..." required>
+    <select id="countrySelect">
+      <option value="vn">🇻🇳 Việt Nam</option>
+      <option value="us">🇺🇸 United States</option>
+      <option value="sg">🇸🇬 Singapore</option>
+      <option value="gb">🇬🇧 United Kingdom</option>
+      <option value="jp">🇯🇵 Japan</option>
+      <option value="kr">🇰🇷 Korea</option>
+      <option value="au">🇦🇺 Australia</option>
+    </select>
+    <button type="submit">Tìm</button>
+  </form>
+  <div id="searchResults" class="search-results"></div>
+</section>
+
+<section class="panel" id="selectedAppPanel" style="display:none">
+  <h2>2. App đã chọn</h2>
+  <div class="selected-app">
+    <div class="selected-app-name" id="selectedAppName"></div>
+    <div class="muted" id="selectedAppSources"></div>
+  </div>
+</section>
+
+<section class="panel" id="runPanel">
+  <h2>3. Cấu hình & chạy</h2>
+  <div class="row">
+    <label class="field">
+      <span>Anthropic API key</span>
+      <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
+    </label>
+    <label class="field">
+      <span>Taxonomy phân loại</span>
+      <select id="taxonomySelect"></select>
+    </label>
+  </div>
+  <p class="muted small">
+    API key chỉ lưu trong trình duyệt của bạn (localStorage) và chỉ gọi thẳng tới
+    <code>api.anthropic.com</code> — không đi qua server nào khác. Mỗi người trong team
+    tự nhập key của mình.
+  </p>
+  <div class="row">
+    <label class="field">
+      <span>Chế độ crawl</span>
+      <select id="crawlModeSelect">
+        <option value="most_recent">N review mới nhất (nhanh: ~600 Google + ~500 Apple)</option>
+        <option value="date_range">Theo khoảng ngày (chậm hơn, lấy hết trong khoảng chọn)</option>
+      </select>
+    </label>
+    <label class="field" id="dateFromField" style="display:none">
+      <span>Từ ngày</span>
+      <input type="date" id="dateFrom">
+    </label>
+    <label class="field" id="dateToField" style="display:none">
+      <span>Đến ngày</span>
+      <input type="date" id="dateTo">
+    </label>
+  </div>
+  <p class="muted small" id="dateRangeHint" style="display:none">
+    Google Play sẽ lấy toàn bộ review trong khoảng này (không giới hạn số lượng, chỉ giới hạn thời gian request).
+    App Store vẫn giới hạn cứng ~500 review gần nhất do chính RSS feed công khai của Apple quy định — nếu app có
+    nhiều review, khoảng ngày xa có thể không được Apple phủ hết.
+  </p>
+
+  <button id="runBtn" class="btn-primary">Crawl + Phân loại + Xem Dashboard</button>
+  <button id="recrawlAppleBtn" class="btn-secondary" style="display:none">Crawl thêm App Store</button>
+  <p id="progress" class="muted"></p>
+</section>
+
+<section class="panel" id="dashboard" style="display:none">
+  <h2 id="dashboardTitle"></h2>
+  <div class="sub" id="subheader"></div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <div class="chart-panel"><h3>Phân bố rating (Google vs Apple)</h3><canvas id="ratingChart"></canvas></div>
+    <div class="chart-panel"><h3>Phân loại theo loại vấn đề</h3><canvas id="categoryChart"></canvas></div>
+    <div class="chart-panel full" id="productChartPanel" style="display:none"><h3>Phân loại theo sản phẩm/tính năng</h3><canvas id="productChart"></canvas></div>
+    <div class="chart-panel full"><h3>Số lượng review theo tháng</h3><canvas id="trendChart"></canvas></div>
+  </div>
+
+  <div class="chart-panel full">
+    <div class="explorer-header">
+      <h3>Review Explorer <span class="count-tag" id="resultCount"></span></h3>
+      <button id="exportBtn" class="btn-secondary">Export Excel</button>
+    </div>
+    <div class="filters">
+      <input type="text" id="searchBox" placeholder="Tìm trong nội dung review...">
+      <select id="sourceFilter"></select>
+      <select id="ratingFilter"></select>
+      <select id="categoryFilter"></select>
+      <select id="productFilter" style="display:none"></select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Nguồn</th><th>Rating</th><th>Ngày</th><th>Version</th><th>Review</th><th>Loại vấn đề</th><th>Sản phẩm/Tính năng</th></tr></thead>
+        <tbody id="reviewRows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<script src="taxonomies.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
