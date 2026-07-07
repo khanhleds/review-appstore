@@ -2,7 +2,14 @@
 // Search both Google Play and Apple App Store by app name.
 // GET /api/search-apps?term=ACB+ONE&country=vn
 
-const gplay = require('google-play-scraper').default;
+// google-play-scraper ships ESM-only — see note in crawl-reviews.js.
+let gplayPromise = null;
+function getGplay() {
+  if (!gplayPromise) {
+    gplayPromise = import('google-play-scraper').then((m) => m.default);
+  }
+  return gplayPromise;
+}
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13,6 +20,7 @@ module.exports = async (req, res) => {
     return;
   }
   const ctry = (country || 'vn').toLowerCase();
+  const gplay = await getGplay();
 
   const [googleResults, appleResults] = await Promise.allSettled([
     gplay.search({ term, num: 8, country: ctry, lang: ctry === 'vn' ? 'vi' : 'en' }),
