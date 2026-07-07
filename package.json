@@ -1,0 +1,9 @@
+{
+  "name": "app-review-dashboard",
+  "version": "1.0.0",
+  "description": "Team dashboard: search any app, crawl Google Play + App Store reviews, classify with Claude, view results",
+  "private": true,
+  "dependencies": {
+    "google-play-scraper": "^10.0.0"
+  }
+}

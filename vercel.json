@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/crawl-reviews.js": {
+      "maxDuration": 45
+    },
+    "api/search-apps.js": {
+      "maxDuration": 15
+    }
+  }
+}
