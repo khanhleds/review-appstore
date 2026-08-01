@@ -23,6 +23,147 @@ function getApiKey() {
 }
 
 // ---------------------------------------------------------------------
+// Local cache (per-browser) — avoids re-spending tokens and re-crawling.
+// Three layers:
+//   1. Raw crawl cache: keyed by (app + country + crawl mode/date range),
+//      NOT by taxonomy. Skips hitting Google Play / Apple entirely when
+//      re-running the same app — e.g. switching taxonomy and re-classifying
+//      no longer needs a fresh crawl.
+//   2. Classification cache: keyed by (taxonomy + hash of review text) so
+//      re-crawling an app that overlaps with a previous crawl skips
+//      re-classifying reviews already seen — this is what actually saves
+//      Claude API tokens.
+//   3. Full-result cache: keyed by (app + taxonomy + crawl mode/date range)
+//      so reopening the exact same search can restore the whole dashboard
+//      instantly with zero API calls and zero crawling.
+// This is per-browser (localStorage), not shared across the team.
+// ---------------------------------------------------------------------
+
+const CRAWL_CACHE_KEY = 'app_review_dashboard_crawl_cache_v1';
+const CLASSIFY_CACHE_KEY = 'app_review_dashboard_classify_cache_v1';
+const RESULT_CACHE_KEY = 'app_review_dashboard_results_v1';
+const MAX_CACHED_RESULTS = 15; // evict oldest beyond this to keep localStorage small
+const MAX_CACHED_CRAWLS = 15;
+
+function hashText(text) {
+  // Small, fast, non-cryptographic hash (FNV-1a) — just needs to be a short,
+  // stable key for a review's text, not to resist collisions adversarially.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+function loadClassifyCache() {
+  try {
+    return JSON.parse(localStorage.getItem(CLASSIFY_CACHE_KEY) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveClassifyCache(cache) {
+  try {
+    localStorage.setItem(CLASSIFY_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) {
+    console.warn('Không lưu được classify cache (có thể localStorage đầy):', e);
+  }
+}
+
+function loadResultCache() {
+  try {
+    return JSON.parse(localStorage.getItem(RESULT_CACHE_KEY) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveResultCache(cache) {
+  try {
+    localStorage.setItem(RESULT_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) {
+    console.warn('Không lưu được result cache (có thể localStorage đầy) — xóa bớt cache cũ và thử lại.', e);
+  }
+}
+
+function resultCacheKey(selected, taxonomyKey, crawlMode, since, until) {
+  return [selected.app_id || '', selected.apple_id || '', taxonomyKey, crawlMode, since || '', until || ''].join('|');
+}
+
+function cacheFullResult() {
+  const key = resultCacheKey(state.selected, state.taxonomyKey, crawlModeSelect.value, getEffectiveDateRange().since, getEffectiveDateRange().until);
+  const cache = loadResultCache();
+  cache[key] = {
+    savedAt: new Date().toISOString(),
+    selected: state.selected,
+    google: state.google,
+    apple: state.apple,
+    classifications: state.classifications,
+    taxonomyKey: state.taxonomyKey,
+  };
+  // Evict oldest entries beyond the cap
+  const entries = Object.entries(cache).sort((a, b) => new Date(b[1].savedAt) - new Date(a[1].savedAt));
+  const trimmed = Object.fromEntries(entries.slice(0, MAX_CACHED_RESULTS));
+  saveResultCache(trimmed);
+}
+
+function getCachedResult() {
+  const key = resultCacheKey(state.selected, state.taxonomyKey, crawlModeSelect.value, getEffectiveDateRange().since, getEffectiveDateRange().until);
+  const cache = loadResultCache();
+  return cache[key] || null;
+}
+
+// --- Raw crawl cache (taxonomy-independent) ---
+
+function loadCrawlCache() {
+  try {
+    return JSON.parse(localStorage.getItem(CRAWL_CACHE_KEY) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveCrawlCache(cache) {
+  try {
+    localStorage.setItem(CRAWL_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) {
+    console.warn('Không lưu được crawl cache (có thể localStorage đầy):', e);
+  }
+}
+
+function crawlCacheKey(selected, crawlMode, since, until) {
+  return [selected.app_id || '', selected.apple_id || '', selected.country || '', crawlMode, since || '', until || ''].join('|');
+}
+
+function cacheRawCrawl(crawlData) {
+  const key = crawlCacheKey(state.selected, crawlModeSelect.value, getEffectiveDateRange().since, getEffectiveDateRange().until);
+  const cache = loadCrawlCache();
+  cache[key] = {
+    savedAt: new Date().toISOString(),
+    google: crawlData.google || [],
+    apple: crawlData.apple || [],
+    apple_note: crawlData.apple_note || null,
+  };
+  const entries = Object.entries(cache).sort((a, b) => new Date(b[1].savedAt) - new Date(a[1].savedAt));
+  const trimmed = Object.fromEntries(entries.slice(0, MAX_CACHED_CRAWLS));
+  saveCrawlCache(trimmed);
+}
+
+function getCachedCrawl() {
+  const key = crawlCacheKey(state.selected, crawlModeSelect.value, getEffectiveDateRange().since, getEffectiveDateRange().until);
+  const cache = loadCrawlCache();
+  return cache[key] || null;
+}
+
+function clearAllCache() {
+  localStorage.removeItem(CRAWL_CACHE_KEY);
+  localStorage.removeItem(CLASSIFY_CACHE_KEY);
+  localStorage.removeItem(RESULT_CACHE_KEY);
+}
+
+// ---------------------------------------------------------------------
 // Step 1 — search apps by name
 // ---------------------------------------------------------------------
 
@@ -117,7 +258,57 @@ function selectApp(pair, country) {
     .filter(Boolean)
     .join(' · ');
   document.getElementById('runPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  refreshCacheBanner();
 }
+
+function refreshCacheBanner() {
+  const banner = document.getElementById('cacheBanner');
+  if (!state.selected.name) {
+    banner.style.display = 'none';
+    return;
+  }
+  const fullResult = getCachedResult();
+  if (fullResult) {
+    const savedDate = new Date(fullResult.savedAt);
+    const total = fullResult.google.length + fullResult.apple.length;
+    document.getElementById('cacheBannerText').textContent =
+      `💾 Có dashboard đã lưu (${total} review, lúc ${savedDate.toLocaleString('vi-VN')}) — tải lại không tốn token, không crawl lại.`;
+    document.getElementById('loadCacheBtn').textContent = 'Tải từ cache';
+    document.getElementById('loadCacheBtn').style.display = 'inline-block';
+    banner.style.display = 'flex';
+    return;
+  }
+  const rawCrawl = getCachedCrawl();
+  if (rawCrawl) {
+    const savedDate = new Date(rawCrawl.savedAt);
+    const total = rawCrawl.google.length + rawCrawl.apple.length;
+    document.getElementById('cacheBannerText').textContent =
+      `📦 Đã có dữ liệu crawl thô (${total} review, lúc ${savedDate.toLocaleString('vi-VN')}) cho app/khoảng ngày này — bấm "Crawl + Phân loại" sẽ bỏ qua bước crawl, chỉ tốn token cho phần chưa phân loại.`;
+    banner.style.display = 'flex';
+    document.getElementById('loadCacheBtn').style.display = 'none';
+    return;
+  }
+  banner.style.display = 'none';
+}
+
+document.getElementById('loadCacheBtn').addEventListener('click', () => {
+  const cached = getCachedResult();
+  if (!cached) return;
+  state.google = cached.google;
+  state.apple = cached.apple;
+  state.classifications = cached.classifications;
+  state.taxonomyKey = cached.taxonomyKey;
+  document.getElementById('recrawlAppleBtn').style.display = state.selected.apple_id ? 'inline-block' : 'none';
+  renderDashboard();
+  setProgress('Đã tải dashboard từ cache — không tốn token nào.');
+});
+
+document.getElementById('clearCacheBtn').addEventListener('click', () => {
+  if (!confirm('Xóa toàn bộ cache đã lưu trên trình duyệt này (dữ liệu crawl + kết quả phân loại + dashboard đã lưu)?')) return;
+  clearAllCache();
+  refreshCacheBanner();
+  alert('Đã xóa cache.');
+});
 
 // ---------------------------------------------------------------------
 // Step 2 — crawl + classify + render
@@ -132,6 +323,7 @@ const dateToField = document.getElementById('dateToField');
 const dateRangeHint = document.getElementById('dateRangeHint');
 const dateFrom = document.getElementById('dateFrom');
 const dateTo = document.getElementById('dateTo');
+const forceFreshCheckbox = document.getElementById('forceFreshCheckbox');
 
 // Default date range = last 1 year up to today
 (function initDefaultDateRange() {
@@ -148,7 +340,9 @@ crawlModeSelect.addEventListener('change', () => {
   dateFromField.style.display = isDateRange ? 'flex' : 'none';
   dateToField.style.display = isDateRange ? 'flex' : 'none';
   dateRangeHint.style.display = isDateRange ? 'block' : 'none';
+  refreshCacheBanner();
 });
+[dateFrom, dateTo].forEach((el) => el.addEventListener('change', refreshCacheBanner));
 
 Object.entries(window.TAXONOMIES).forEach(([key, t]) => {
   const opt = document.createElement('option');
@@ -159,6 +353,7 @@ Object.entries(window.TAXONOMIES).forEach(([key, t]) => {
 taxonomySelect.value = state.taxonomyKey;
 taxonomySelect.addEventListener('change', () => {
   state.taxonomyKey = taxonomySelect.value;
+  refreshCacheBanner();
 });
 
 runBtn.addEventListener('click', async () => {
@@ -186,7 +381,7 @@ recrawlAppleBtn.addEventListener('click', async () => {
   recrawlAppleBtn.disabled = true;
   try {
     setProgress('Đang crawl thêm review App Store (gộp với dữ liệu đã có)...');
-    const crawlData = await crawlOnce();
+    const crawlData = await crawlOnce(true); // always fetch fresh — this button's whole purpose is new data
     const before = state.apple.length;
     mergeAppleReviews(crawlData.apple || []);
     const added = state.apple.length - before;
@@ -201,13 +396,15 @@ recrawlAppleBtn.addEventListener('click', async () => {
     }
     const uniqueNew = [...new Set(newTexts)];
     if (uniqueNew.length) {
-      const newClassifications = await classifyAll(uniqueNew, state.taxonomyKey, (done, total) => {
-        setProgress(`Đang phân loại review mới: ${done}/${total}...`);
+      const newClassifications = await classifyAll(uniqueNew, state.taxonomyKey, (done, total, cachedCount) => {
+        const cacheMsg = cachedCount ? ` (${cachedCount} lấy từ cache)` : '';
+        setProgress(`Đang phân loại review mới: ${done}/${total}...${cacheMsg}`);
       });
       Object.assign(state.classifications, newClassifications);
     }
+    cacheFullResult();
     renderDashboard();
-    setProgress(`Xong — đã thêm ${added} review App Store, tổng ${state.google.length + state.apple.length} review.`);
+    setProgress(`Xong — đã thêm ${added} review App Store, tổng ${state.google.length + state.apple.length} review. Đã cập nhật cache.`);
   } catch (err) {
     setProgress(`Lỗi: ${err.message}`, true);
   } finally {
@@ -228,13 +425,36 @@ function getCrawlDateParams() {
   return params;
 }
 
-async function crawlOnce() {
+// Cache keys must ignore the date pickers' values when not in date_range
+// mode — otherwise the (irrelevant, day-changing) default date range would
+// fragment the cache for "most recent" runs that don't actually use it.
+function getEffectiveDateRange() {
+  if (crawlModeSelect.value !== 'date_range') return { since: '', until: '' };
+  return { since: dateFrom.value || '', until: dateTo.value || '' };
+}
+
+async function crawlOnce(forceFresh) {
+  if (!forceFresh) {
+    const cached = getCachedCrawl();
+    if (cached) {
+      return {
+        google: cached.google,
+        apple: cached.apple,
+        apple_note: cached.apple_note,
+        counts: { google: cached.google.length, apple: cached.apple.length },
+        fromCache: true,
+        cachedAt: cached.savedAt,
+      };
+    }
+  }
   const { app_id, apple_id, country } = state.selected;
   const params = new URLSearchParams({ country, ...getCrawlDateParams() });
   if (app_id) params.set('app_id', app_id);
   if (apple_id) params.set('apple_id', apple_id);
   const crawlRes = await fetch(`/api/crawl-reviews?${params}`);
-  return crawlRes.json();
+  const data = await crawlRes.json();
+  cacheRawCrawl(data);
+  return data;
 }
 
 function mergeAppleReviews(newReviews) {
@@ -248,14 +468,18 @@ function mergeAppleReviews(newReviews) {
 }
 
 async function runPipeline() {
+  const forceFresh = forceFreshCheckbox.checked;
   setProgress(`Đang crawl review từ Google Play + App Store${crawlModeSelect.value === 'date_range' ? ` (${dateFrom.value} → ${dateTo.value})` : ''}...`);
-  const crawlData = await crawlOnce();
+  const crawlData = await crawlOnce(forceFresh);
   state.google = crawlData.google || [];
   state.apple = crawlData.apple || [];
   document.getElementById('recrawlAppleBtn').style.display = state.selected.apple_id ? 'inline-block' : 'none';
   if (crawlData.apple_diag) console.log('Apple crawl diagnostics:', crawlData.apple_diag);
+  const crawlSourceMsg = crawlData.fromCache
+    ? ` (lấy từ cache lúc ${new Date(crawlData.cachedAt).toLocaleString('vi-VN')}, không gọi lại Google/Apple)`
+    : '';
   setProgress(
-    `Crawl xong: ${state.google.length} review Google Play, ${state.apple.length} review App Store.` +
+    `Crawl xong: ${state.google.length} review Google Play, ${state.apple.length} review App Store.${crawlSourceMsg}` +
       (crawlData.apple_note ? ` ${crawlData.apple_note}` : '') +
       ' Đang chuẩn bị phân loại...'
   );
@@ -276,13 +500,15 @@ async function runPipeline() {
   state.uniqueTexts = unique;
 
   setProgress(`Đang phân loại ${unique.length} review duy nhất bằng Claude...`);
-  state.classifications = await classifyAll(unique, state.taxonomyKey, (done, total) => {
-    setProgress(`Đang phân loại: ${done}/${total} review...`);
+  state.classifications = await classifyAll(unique, state.taxonomyKey, (done, total, cachedCount) => {
+    const cacheMsg = cachedCount ? ` (${cachedCount} lấy từ cache, không tốn token)` : '';
+    setProgress(`Đang phân loại: ${done}/${total} review...${cacheMsg}`);
   });
 
+  cacheFullResult();
   setProgress(`Hoàn tất. Đang dựng dashboard...`);
   renderDashboard();
-  setProgress(`Xong — ${state.google.length + state.apple.length} review, ${unique.length} unique đã phân loại.`);
+  setProgress(`Xong — ${state.google.length + state.apple.length} review, ${unique.length} unique đã phân loại. Đã lưu cache cho lần sau.`);
 }
 
 // ---------------------------------------------------------------------
@@ -302,10 +528,27 @@ async function classifyAll(texts, taxonomyKey, onProgress) {
     ? productNames.map((name) => `- "${name}": ${taxonomy.productCategories[name]}`).join('\n')
     : null;
 
+  // Check local cache first — skip re-spending tokens on reviews already
+  // classified before under this taxonomy.
+  const cache = loadClassifyCache();
+  const taxCache = cache[taxonomyKey] || {};
   const results = {};
-  let done = 0;
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
+  const toClassify = [];
+  for (const text of texts) {
+    const h = hashText(text);
+    if (taxCache[h]) {
+      results[text] = taxCache[h];
+    } else {
+      toClassify.push(text);
+    }
+  }
+
+  const cachedCount = texts.length - toClassify.length;
+  let done = cachedCount;
+  onProgress(done, texts.length, cachedCount);
+
+  for (let i = 0; i < toClassify.length; i += BATCH_SIZE) {
+    const batch = toClassify.slice(i, i + BATCH_SIZE);
     const batchResult = await classifyBatch(
       batch,
       issueRubric,
@@ -317,8 +560,20 @@ async function classifyAll(texts, taxonomyKey, onProgress) {
     );
     Object.assign(results, batchResult);
     done += batch.length;
-    onProgress(done, texts.length);
+    onProgress(done, texts.length, cachedCount);
   }
+
+  // Persist newly-classified entries to the local cache for next time
+  if (toClassify.length > 0) {
+    const updatedTaxCache = { ...taxCache };
+    for (const text of toClassify) {
+      if (results[text]) updatedTaxCache[hashText(text)] = results[text];
+    }
+    const fullCache = loadClassifyCache();
+    fullCache[taxonomyKey] = updatedTaxCache;
+    saveClassifyCache(fullCache);
+  }
+
   return results;
 }
 

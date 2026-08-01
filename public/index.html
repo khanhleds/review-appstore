@@ -39,6 +39,10 @@
     <div class="selected-app-name" id="selectedAppName"></div>
     <div class="muted" id="selectedAppSources"></div>
   </div>
+  <div id="cacheBanner" class="cache-banner" style="display:none">
+    <span id="cacheBannerText"></span>
+    <button id="loadCacheBtn" class="btn-secondary">Tải từ cache</button>
+  </div>
 </section>
 
 <section class="panel" id="runPanel">
@@ -58,28 +62,38 @@
     <code>api.anthropic.com</code> — không đi qua server nào khác. Mỗi người trong team
     tự nhập key của mình.
   </p>
+  <p class="muted small">
+    Kết quả phân loại được cache trong trình duyệt để tiết kiệm token cho lần chạy sau.
+    <button id="clearCacheBtn" class="btn-link">Xóa cache</button>
+  </p>
   <div class="row">
     <label class="field">
       <span>Chế độ crawl</span>
       <select id="crawlModeSelect">
-        <option value="most_recent">N review mới nhất (nhanh: ~600 Google + ~500 Apple)</option>
-        <option value="date_range">Theo khoảng ngày (chậm hơn, lấy hết trong khoảng chọn)</option>
+        <option value="date_range" selected>Theo khoảng ngày (mặc định: 1 năm gần nhất)</option>
+        <option value="most_recent">N review mới nhất (nhanh: ~600 Google + ~500 Apple, không theo ngày)</option>
       </select>
     </label>
-    <label class="field" id="dateFromField" style="display:none">
+    <label class="field" id="dateFromField">
       <span>Từ ngày</span>
       <input type="date" id="dateFrom">
     </label>
-    <label class="field" id="dateToField" style="display:none">
+    <label class="field" id="dateToField">
       <span>Đến ngày</span>
       <input type="date" id="dateTo">
     </label>
   </div>
-  <p class="muted small" id="dateRangeHint" style="display:none">
+  <p class="muted small" id="dateRangeHint">
+    Mặc định lấy đúng 1 năm gần nhất tính từ hôm nay — có thể chỉnh lại "Từ ngày"/"Đến ngày" theo ý muốn.
     Google Play sẽ lấy toàn bộ review trong khoảng này (không giới hạn số lượng, chỉ giới hạn thời gian request).
     App Store vẫn giới hạn cứng ~500 review gần nhất do chính RSS feed công khai của Apple quy định — nếu app có
     nhiều review, khoảng ngày xa có thể không được Apple phủ hết.
   </p>
+
+  <label class="checkbox-row">
+    <input type="checkbox" id="forceFreshCheckbox">
+    <span>Bỏ qua cache, crawl dữ liệu mới (mặc định: dùng lại dữ liệu đã crawl trước đó cho cùng app/khoảng ngày nếu có)</span>
+  </label>
 
   <button id="runBtn" class="btn-primary">Crawl + Phân loại + Xem Dashboard</button>
   <button id="recrawlAppleBtn" class="btn-secondary" style="display:none">Crawl thêm App Store</button>
