@@ -879,21 +879,192 @@ function setupExplorer(rows, issueCategories, productCategories) {
 
 function setupExport(rows, hasProduct) {
   const btn = document.getElementById('exportBtn');
-  btn.onclick = () => {
-    const sheetData = rows.map((r) => ({
-      Source: r.source,
-      Rating: r.rating,
-      Date: r.date,
-      Version: r.version,
-      Review: r.review,
-      'Issue Categories': r.issueCategories.join(', '),
-      ...(hasProduct ? { 'Product/Feature': r.productCategories.join(', ') } : {}),
-    }));
-    const ws = XLSX.utils.json_to_sheet(sheetData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Reviews');
-    XLSX.writeFile(wb, `${state.selected.name.replace(/[^a-z0-9]+/gi, '_')}_reviews.xlsx`);
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Đang tạo file...';
+    try {
+      await exportRichExcel(rows, hasProduct);
+    } catch (err) {
+      alert('Lỗi khi tạo file Excel: ' + err.message);
+      console.error(err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   };
+}
+
+const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B2338' } };
+const HEADER_FONT = { color: { argb: 'FFE8ECF4' }, bold: true };
+
+function styleHeaderRow(row) {
+  row.eachCell((cell) => {
+    cell.fill = HEADER_FILL;
+    cell.font = HEADER_FONT;
+    cell.alignment = { vertical: 'middle' };
+  });
+  row.height = 20;
+}
+
+function autoSizeColumns(ws, minWidth = 10, maxWidth = 60) {
+  ws.columns.forEach((col) => {
+    let max = minWidth;
+    col.eachCell({ includeEmpty: true }, (cell) => {
+      const len = (cell.value != null ? String(cell.value) : '').length;
+      if (len > max) max = len;
+    });
+    col.width = Math.min(max + 2, maxWidth);
+  });
+}
+
+function excelColLetter(index1Based) {
+  // Converts a 1-based column index to Excel column letters (1='A', 26='Z', 27='AA', ...)
+  let n = index1Based;
+  let letters = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+}
+
+async function exportRichExcel(rows, hasProduct) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'App Review Dashboard';
+  wb.created = new Date();
+
+  const total = rows.length;
+  const googleCount = rows.filter((r) => r.source === 'google_play').length;
+  const appleCount = rows.filter((r) => r.source === 'apple_store').length;
+  const avgRating = total ? rows.reduce((s, r) => s + (r.rating || 0), 0) / total : 0;
+  const dates = rows.map((r) => r.date).filter(Boolean).sort();
+
+  // --- Sheet 1: Tổng quan (KPI) ---
+  const wsOverview = wb.addWorksheet('Tổng quan');
+  wsOverview.columns = [{ width: 28 }, { width: 40 }];
+  const overviewRows = [
+    ['App', state.selected.name],
+    ['Ngày xuất báo cáo', new Date().toLocaleString('vi-VN')],
+    ['Taxonomy phân loại', window.TAXONOMIES[state.taxonomyKey].label],
+    ['Khoảng dữ liệu', dates.length ? `${formatDateVN(dates[0])} – ${formatDateVN(dates[dates.length - 1])}` : '—'],
+    [],
+    ['Tổng số review', total],
+    ['Điểm trung bình', Number(avgRating.toFixed(2))],
+    ['Review Google Play', googleCount],
+    ['Review App Store', appleCount],
+  ];
+  overviewRows.forEach((r) => wsOverview.addRow(r));
+  wsOverview.getCell('A1').font = { bold: true, size: 14 };
+  ['A1', 'A2', 'A3', 'A4', 'A6', 'A7', 'A8', 'A9'].forEach((addr) => {
+    wsOverview.getCell(addr).font = { ...(wsOverview.getCell(addr).font || {}), bold: true };
+  });
+
+  // --- Sheet 2: Reviews (raw data) ---
+  const wsReviews = wb.addWorksheet('Reviews');
+  const headers = ['Nguồn', 'Rating', 'Ngày', 'Version', 'Review', 'Loại vấn đề'];
+  if (hasProduct) headers.push('Sản phẩm/Tính năng');
+  wsReviews.addRow(headers);
+  styleHeaderRow(wsReviews.getRow(1));
+  rows.forEach((r) => {
+    const line = [r.source, r.rating, r.date, r.version, r.review, r.issueCategories.join(', ')];
+    if (hasProduct) line.push(r.productCategories.join(', '));
+    wsReviews.addRow(line);
+  });
+  wsReviews.getColumn(5).width = 60; // Review text column
+  wsReviews.getColumn(5).alignment = { wrapText: true, vertical: 'top' };
+  autoSizeColumns(wsReviews, 10, 60);
+  wsReviews.views = [{ state: 'frozen', ySplit: 1 }];
+  wsReviews.autoFilter = { from: 'A1', to: `${hasProduct ? 'G' : 'F'}1` };
+
+  // --- Sheet 3: Theo tháng ---
+  const monthMap = {};
+  for (const r of rows) {
+    if (!r.date) continue;
+    const m = r.date.slice(0, 7);
+    if (!monthMap[m]) monthMap[m] = { count: 0, ratingSum: 0 };
+    monthMap[m].count++;
+    monthMap[m].ratingSum += r.rating || 0;
+  }
+  const months = Object.keys(monthMap).sort();
+  const wsMonth = wb.addWorksheet('Theo tháng');
+  wsMonth.addRow(['Tháng', 'Số review', 'Điểm TB']);
+  styleHeaderRow(wsMonth.getRow(1));
+  months.forEach((m) => {
+    const d = monthMap[m];
+    wsMonth.addRow([m, d.count, Number((d.ratingSum / d.count).toFixed(2))]);
+  });
+  autoSizeColumns(wsMonth);
+
+  // --- Sheet 4: Theo loại vấn đề ---
+  const issueCounts = {};
+  for (const r of rows) {
+    for (const c of r.issueCategories) issueCounts[c] = (issueCounts[c] || 0) + 1;
+  }
+  const issueEntries = Object.entries(issueCounts).sort((a, b) => b[1] - a[1]);
+  const wsIssue = wb.addWorksheet('Loại vấn đề');
+  wsIssue.addRow(['Loại vấn đề', 'Số review', '% tổng']);
+  styleHeaderRow(wsIssue.getRow(1));
+  issueEntries.forEach(([name, count]) => {
+    wsIssue.addRow([name, count, total ? `${((count / total) * 100).toFixed(1)}%` : '0%']);
+  });
+  autoSizeColumns(wsIssue, 10, 45);
+
+  // --- Sheet 5: Theo sản phẩm/tính năng (nếu có) ---
+  let productEntries = [];
+  if (hasProduct) {
+    const productCounts = {};
+    for (const r of rows) {
+      for (const p of r.productCategories) productCounts[p] = (productCounts[p] || 0) + 1;
+    }
+    productEntries = Object.entries(productCounts).sort((a, b) => b[1] - a[1]);
+    const wsProduct = wb.addWorksheet('Sản phẩm-Tính năng');
+    wsProduct.addRow(['Sản phẩm/Tính năng', 'Số review', '% tổng']);
+    styleHeaderRow(wsProduct.getRow(1));
+    productEntries.forEach(([name, count]) => {
+      wsProduct.addRow([name, count, total ? `${((count / total) * 100).toFixed(1)}%` : '0%']);
+    });
+    autoSizeColumns(wsProduct, 10, 45);
+  }
+
+  // --- Sheet 6: Heatmap (Loại vấn đề x Tháng) — real Excel conditional
+  // formatting color scale, not static per-cell colors, so it stays "live"
+  // if the person edits values in Excel afterwards.
+  if (months.length && issueEntries.length) {
+    const wsHeat = wb.addWorksheet('Heatmap');
+    wsHeat.addRow(['Loại vấn đề', ...months]);
+    styleHeaderRow(wsHeat.getRow(1));
+    const issueNames = issueEntries.map((e) => e[0]);
+    for (const name of issueNames) {
+      const rowVals = months.map((m) => rows.filter((r) => r.date && r.date.slice(0, 7) === m && r.issueCategories.includes(name)).length);
+      wsHeat.addRow([name, ...rowVals]);
+    }
+    const lastCol = excelColLetter(months.length + 1); // +1: month columns start at B (col 2)
+    const dataRange = `B2:${lastCol}${issueNames.length + 1}`;
+    wsHeat.addConditionalFormatting({
+      ref: dataRange,
+      rules: [
+        {
+          type: 'colorScale',
+          cfvo: [{ type: 'min' }, { type: 'percentile', value: 50 }, { type: 'max' }],
+          color: [{ argb: 'FF2ECC71' }, { argb: 'FFF5D033' }, { argb: 'FFE74C3C' }],
+        },
+      ],
+    });
+    autoSizeColumns(wsHeat, 10, 45);
+  }
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${state.selected.name.replace(/[^a-z0-9]+/gi, '_')}_review_dashboard.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function formatDateVN(isoDate) {
