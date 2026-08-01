@@ -21,7 +21,12 @@
 let gplayPromise = null;
 function getGplay() {
   if (!gplayPromise) {
-    gplayPromise = import('google-play-scraper').then((m) => m.default);
+    gplayPromise = import('google-play-scraper')
+      .then((m) => m.default)
+      .catch((err) => {
+        gplayPromise = null; // don't permanently cache a failed import — retry next call
+        throw err;
+      });
   }
   return gplayPromise;
 }
